@@ -8,11 +8,8 @@ from fastapi.middleware.cors import CORSMiddleware
 from pydantic import BaseModel, Field
 
 # --- retriever import (패키지/단일파일 모두 대응) ---
-try:
-    from core.retriever import BookRetriever
-except ModuleNotFoundError:
-    from retriever import BookRetriever  # 프로젝트 루트에 파일이 있을 때
-
+from core.retriever import BookRetriever
+from index_loader import ensure_faiss_index
 # --- DeepSeekRecommender import (파일명 오타 대응: llm_integration / llm_intergration 둘 다 시도) ---
 DeepSeekRecommender = None
 try:
@@ -75,9 +72,16 @@ def _get_index_path() -> str:
 @app.on_event("startup")
 def _startup():
     global _retriever, _recommender
-    # 1) FAISS 로드
-    _retriever = BookRetriever(_get_index_path())
-    # 2) DeepSeek 준비(키가 있어야 활성화)
+    # 0) 인덱스 경로 계산
+    index_path = _get_index_path()
+
+    # 1) 인덱스가 없으면 zip에서 다운로드 + 압축 해제
+    ensure_faiss_index(index_path)
+
+    # 2) FAISS 로드
+    _retriever = BookRetriever(index_path)
+
+    # 3) DeepSeek 준비(키가 있어야 활성화)
     api_key = os.getenv("DEEPSEEK_API_KEY")
     if DeepSeekRecommender and api_key:
         try:

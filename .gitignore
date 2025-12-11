@@ -12,6 +12,8 @@ venv/
 # 데이터/중간 결과
 backend/data/
 backend/models/faiss_index/
+backend/models/faiss_index.zip
+*.zip
 *.csv
 
 # OS
