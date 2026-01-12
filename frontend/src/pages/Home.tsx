@@ -28,7 +28,7 @@ type ChatMessage = {
  *    - .env 에 VITE_API_BASE_URL 이 없으면 127.0.0.1:8000 사용
  * ---------------------------------------------------------*/
 const API_BASE =
-  (import.meta as any).env?.VITE_API_BASE_URL ?? "http://127.0.0.1:8000"
+  (import.meta as any).env?.VITE_API_BASE ?? "http://127.0.0.1:8000"
 
 async function fetchRecommend(query: string, topK = 5) {
   const resp = await fetch(`${API_BASE}/recommend`, {

@@ -13,8 +13,12 @@ venv/
 backend/data/
 backend/models/faiss_index/
 backend/models/faiss_index.zip
+backend/models/faiss_index_v2/
+backend/models/faiss_index_v2.zip
+*.faiss
 *.zip
 *.csv
+*.parquet
 
 # OS
 .DS_Store

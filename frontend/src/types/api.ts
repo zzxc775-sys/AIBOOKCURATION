@@ -2,7 +2,7 @@
 // 백엔드의 베이스 URL을 환경변수에서 읽고, 없으면 로컬 8000으로.
 const API_BASE =
   // Vite에서는 env 변수를 import.meta.env.VITE_* 로 읽는다.
-  import.meta.env.VITE_API_BASE_URL ?? "http://localhost:8000";
+  import.meta.env.VITE_API_BASE ?? "http://localhost:8000";
 
 /**
  * 추천 API 호출
@@ -32,13 +32,16 @@ export async function fetchRecommend(query: string, topK = 5) {
   // 서버의 RecommendResponse(items: Book[]) 스키마를 그대로 따름
   const data = await resp.json();
   return data as {
-    items: Array<{
+    query: string;
+    results: Array<{
       id?: string;
       title: string;
       author?: string;
       description?: string;
+      content?: string;
       thumbnail?: string;
       score?: number;
     }>;
+    content?: string;
   };
 }
