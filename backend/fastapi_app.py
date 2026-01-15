@@ -28,10 +28,16 @@ except ModuleNotFoundError:
 
 app = FastAPI(title="AI Book Curation API", version="0.2.0")
 
-# CORS: 프론트(5173) 허용
+# CORS: 환경변수 기반 (배포/로컬 모두 대응)
+cors_env = os.getenv(
+    "CORS_ORIGINS",
+    "http://localhost:5173,http://127.0.0.1:5173"
+)
+origins = [o.strip() for o in cors_env.split(",") if o.strip()]
+
 app.add_middleware(
     CORSMiddleware,
-    allow_origins=["http://localhost:5173", "http://127.0.0.1:5173"],
+    allow_origins=origins,
     allow_credentials=True,
     allow_methods=["*"],
     allow_headers=["*"],
