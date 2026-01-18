@@ -1,6 +1,7 @@
 # fastapi_app.py (교체/추가 포함 완성본)
 
 import os
+import time
 from typing import List, Optional, Dict
 
 from fastapi import FastAPI, HTTPException
@@ -71,7 +72,7 @@ class RecommendResponse(BaseModel):
     query: str
     results: List[Book]
     content: Optional[str] = None  # LLM 요약문(없을 수 있음)
-
+    debug: Optional[Dict] = None  # ✅ 추가
 
 # ---------- 전역 리소스 ----------
 # v1(BookRetriever) 또는 v2(BookRetrieverV2) 모두 들어갈 수 있으니 타입을 넓게 잡음
@@ -146,14 +147,20 @@ def recommend(req: RecommendRequest):
     if _retriever is None:
         raise HTTPException(status_code=500, detail="Retriever가 초기화되지 않았습니다.")
 
+    timings = {}
+    t0 = time.perf_counter()
+    
     # 1) 임베딩/FAISS 유사도 검색
     try:
+        t_search0 = time.perf_counter()
         # v1/v2 모두 retrieve(query, top_k) 인터페이스를 맞춘다는 전제
         raw_items = _retriever.retrieve(req.query, top_k=req.top_k)  # type: ignore[attr-defined]
+        timings["search_sec"] = round(time.perf_counter() - t_search0, 4)
     except Exception as e:
         raise HTTPException(status_code=500, detail=f"검색 중 오류: {e}")
 
     # 2) 프론트 스키마에 맞게 매핑
+    t_map0 = time.perf_counter()
     items: List[Book] = []
     for r in (raw_items or []):
         items.append(
@@ -174,15 +181,30 @@ def recommend(req: RecommendRequest):
                 isbn=r.get("isbn")
             )
         )
-
+    timings["map_sec"] = round(time.perf_counter() - t_map0, 4)
     # 3) (선택) DeepSeek 요약문
     summary = None
+    llm_error = None
+    llm_used = False
+    
     if _recommender is not None and items:
         try:
+            t_llm0 = time.perf_counter()
             topN = [b.model_dump() for b in items[:5]]
             out = _recommender.generate_recommendation(req.query, topN, model="deepseek-chat")
             summary = out.get("content")
-        except Exception:
-            summary = None  # LLM 실패해도 결과는 그대로
+            timings["llm_sec"] = round(time.perf_counter() - t_llm0, 4)
+        except Exception as e:
+            timings["llm_sec"] = round(time.perf_counter() - t_llm0, 4)
+            llm_error = str(e)
 
-    return RecommendResponse(query=req.query, results=items, content=summary)
+    timings["total_sec"] = round(time.perf_counter() - t0, 4)
+    timings["llm_used"] = llm_used
+    if llm_error:
+        timings["llm_error"] = llm_error
+
+     # ✅ debug는 환경변수 켰을 때만 내려주기 (운영에서 항상 노출 방지)
+    include_debug = os.getenv("INCLUDE_TIMINGS", "0") == "1"
+    debug = timings if include_debug else None
+
+    return RecommendResponse(query=req.query, results=items, content=summary, debug=debug)
