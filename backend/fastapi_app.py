@@ -17,16 +17,16 @@ from index_loader import ensure_faiss_index, ensure_faiss_index_v2
 # --- DeepSeekRecommender import (파일명 오타 대응: llm_integration / llm_intergration 둘 다 시도) ---
 DeepSeekRecommender = None
 try:
-    from core.llm_intergration import DeepSeekRecommender as _DS
+    from core.llm_integration import DeepSeekRecommender as _DS
     DeepSeekRecommender = _DS
 except ModuleNotFoundError:
     try:
         # 혹시 이전에 'llm_intergration.py' 오타 파일명이 있을 수도 있음
-        from core.llm_intergration import DeepSeekRecommender as _DS2
+        from core.llm_integration import DeepSeekRecommender as _DS2
         DeepSeekRecommender = _DS2
     except ModuleNotFoundError:
-        pass  # LLM 비활성화 모드로 동작
-
+        DeepSeekRecommender = None
+        
 app = FastAPI(title="AI Book Curation API", version="0.2.0")
 
 # CORS: 환경변수 기반 (배포/로컬 모두 대응)
@@ -182,6 +182,22 @@ def recommend(req: RecommendRequest):
             )
         )
     timings["map_sec"] = round(time.perf_counter() - t_map0, 4)
+    
+    def _llm_book_payload(b: Book) -> Dict:
+        # LLM에 보낼 최소 정보만 구성 (입력 토큰 절약)
+        text = (b.description or b.content or "").strip()
+        # 앞부분부터 자르기 (요약/소개는 보통 앞에 핵심이 있음)
+        if len(text) > 140:
+            text = text[:140] + "..."
+        return {
+            "title": b.title,
+            "author": b.author,
+            "snippet": text,
+            "score_pct": b.score_pct,
+            "score": b.score,
+            "rank": b.rank,
+        }
+    
     # 3) (선택) DeepSeek 요약문
     summary = None
     llm_error = None
