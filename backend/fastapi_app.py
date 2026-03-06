@@ -18,22 +18,21 @@ from index_loader import ensure_faiss_index, ensure_faiss_index_v2
 DeepSeekRecommender = None
 try:
     from core.llm_integration import DeepSeekRecommender as _DS
+
     DeepSeekRecommender = _DS
 except ModuleNotFoundError:
     try:
         # 혹시 이전에 'llm_intergration.py' 오타 파일명이 있을 수도 있음
         from core.llm_integration import DeepSeekRecommender as _DS2
+
         DeepSeekRecommender = _DS2
     except ModuleNotFoundError:
         DeepSeekRecommender = None
-        
+
 app = FastAPI(title="AI Book Curation API", version="0.2.0")
 
 # CORS: 환경변수 기반 (배포/로컬 모두 대응)
-cors_env = os.getenv(
-    "CORS_ORIGINS",
-    "http://localhost:5173,http://127.0.0.1:5173"
-)
+cors_env = os.getenv("CORS_ORIGINS", "http://localhost:5173,http://127.0.0.1:5173")
 origins = [o.strip() for o in cors_env.split(",") if o.strip()]
 
 app.add_middleware(
@@ -43,6 +42,7 @@ app.add_middleware(
     allow_methods=["*"],
     allow_headers=["*"],
 )
+
 
 # ---------- 스키마 ----------
 class Book(BaseModel):
@@ -74,6 +74,23 @@ class RecommendResponse(BaseModel):
     content: Optional[str] = None  # LLM 요약문(없을 수 있음)
     debug: Optional[Dict] = None  # ✅ 추가
 
+class SummaryBook(BaseModel):
+    title: str
+    author: Optional[str] = None
+    snippet: Optional[str] = None
+    score_pct: Optional[int] = None
+    rank: Optional[int] = None
+
+
+class SummaryRequest(BaseModel):
+    query: str
+    books: List[SummaryBook] = Field(..., min_items=1, max_items=5)
+
+
+class SummaryResponse(BaseModel):
+    content: Optional[str] = None
+    debug: Optional[Dict] = None
+
 # ---------- 전역 리소스 ----------
 # v1(BookRetriever) 또는 v2(BookRetrieverV2) 모두 들어갈 수 있으니 타입을 넓게 잡음
 _retriever: Optional[object] = None
@@ -83,8 +100,7 @@ _recommender: Optional[object] = None  # DeepSeekRecommender 인스턴스 또는
 def _get_index_path() -> str:
     # v1 기본 경로(기존 유지). v2에서는 보통 사용 안 함.
     return os.getenv(
-        "INDEX_PATH",
-        os.path.join(os.path.dirname(__file__), "models", "faiss_index")
+        "INDEX_PATH", os.path.join(os.path.dirname(__file__), "models", "faiss_index")
     )
 
 
@@ -101,7 +117,7 @@ def _startup():
         # v2: get_retriever()가 BookRetrieverV2를 만들어서 리턴
         # (models/faiss_index_v2/index.faiss + meta.parquet 로딩)
         v2_dir = os.path.join(os.path.dirname(__file__), "models", "faiss_index_v2")
-        ensure_faiss_index_v2(v2_dir)   # ✅ 추가: v2 인덱스/메타 준비
+        ensure_faiss_index_v2(v2_dir)  # ✅ 추가: v2 인덱스/메타 준비
         _retriever = get_retriever()
         print("✅ Retriever initialized: v2")
 
@@ -112,6 +128,7 @@ def _startup():
 
         # v1 retriever는 여기서만 import (v2 쓸 때 불필요 의존성 로딩 방지)
         from core.retriever import BookRetriever
+
         _retriever = BookRetriever(index_path)
         print("✅ Retriever initialized: v1")
 
@@ -145,11 +162,13 @@ def recommend(req: RecommendRequest):
     if not req.query.strip():
         raise HTTPException(status_code=400, detail="query는 비어 있을 수 없습니다.")
     if _retriever is None:
-        raise HTTPException(status_code=500, detail="Retriever가 초기화되지 않았습니다.")
+        raise HTTPException(
+            status_code=500, detail="Retriever가 초기화되지 않았습니다."
+        )
 
     timings = {}
     t0 = time.perf_counter()
-    
+
     # 1) 임베딩/FAISS 유사도 검색
     try:
         t_search0 = time.perf_counter()
@@ -162,7 +181,7 @@ def recommend(req: RecommendRequest):
     # 2) 프론트 스키마에 맞게 매핑
     t_map0 = time.perf_counter()
     items: List[Book] = []
-    for r in (raw_items or []):
+    for r in raw_items or []:
         items.append(
             Book(
                 id=r.get("id"),
@@ -178,49 +197,65 @@ def recommend(req: RecommendRequest):
                 stars=r.get("stars"),
                 distance=r.get("distance"),
                 publisher=r.get("publisher"),
-                isbn=r.get("isbn")
+                isbn=r.get("isbn"),
             )
         )
     timings["map_sec"] = round(time.perf_counter() - t_map0, 4)
-    
+
     def _llm_book_payload(b: Book) -> Dict:
-        # LLM에 보낼 최소 정보만 구성 (입력 토큰 절약)
+        """
+        LLM에 보낼 최소 정보만 구성 (snippet 80자).
+        """
         text = (b.description or b.content or "").strip()
-        # 앞부분부터 자르기 (요약/소개는 보통 앞에 핵심이 있음)
-        if len(text) > 140:
-            text = text[:140] + "..."
+        text = " ".join(text.split())  # 공백/줄바꿈 정리
+        if len(text) > 80:
+            text = text[:80] + "..."
+
         return {
             "title": b.title,
             "author": b.author,
             "snippet": text,
             "score_pct": b.score_pct,
-            "score": b.score,
             "rank": b.rank,
         }
-    
-    # 3) (선택) DeepSeek 요약문
+
     summary = None
-    llm_error = None
-    llm_used = False
     
-    if _recommender is not None and items:
-        try:
-            t_llm0 = time.perf_counter()
-            topN = [b.model_dump() for b in items[:5]]
-            out = _recommender.generate_recommendation(req.query, topN, model="deepseek-chat")
-            summary = out.get("content")
-            timings["llm_sec"] = round(time.perf_counter() - t_llm0, 4)
-        except Exception as e:
-            timings["llm_sec"] = round(time.perf_counter() - t_llm0, 4)
-            llm_error = str(e)
-
-    timings["total_sec"] = round(time.perf_counter() - t0, 4)
-    timings["llm_used"] = llm_used
-    if llm_error:
-        timings["llm_error"] = llm_error
-
-     # ✅ debug는 환경변수 켰을 때만 내려주기 (운영에서 항상 노출 방지)
+    # ✅ debug는 환경변수 켰을 때만 내려주기 (운영에서 항상 노출 방지)
     include_debug = os.getenv("INCLUDE_TIMINGS", "0") == "1"
     debug = timings if include_debug else None
 
-    return RecommendResponse(query=req.query, results=items, content=summary, debug=debug)
+    return RecommendResponse(
+        query=req.query, results=items, content=summary, debug=debug
+    )
+    
+@app.post("/summary", response_model=SummaryResponse)
+def summary(req: SummaryRequest):
+    if not req.query.strip():
+        raise HTTPException(status_code=400, detail="query는 비어 있을 수 없습니다.")
+
+    if _recommender is None:
+        # 운영정책에 따라 503 또는 content=None 반환 중 택1
+        # 여기서는 503이 디버깅에 더 명확함
+        raise HTTPException(status_code=503, detail="LLM recommender가 비활성 상태입니다.")
+
+    timings = {}
+    t_llm0 = time.perf_counter()
+    content = None
+    llm_error = None
+
+    try:
+        # SummaryBook(BaseModel) -> dict로 변환
+        books_payload = [b.model_dump() for b in req.books][:5]
+        out = _recommender.generate_recommendation(req.query, books_payload, model="deepseek-chat")
+        content = out.get("content")
+    except Exception as e:
+        llm_error = repr(e)
+        content = None
+    finally:
+        timings["llm_sec"] = round(time.perf_counter() - t_llm0, 4)
+        timings["llm_error"] = llm_error
+
+    include_debug = os.getenv("INCLUDE_TIMINGS", "0") == "1"
+    debug = timings if include_debug else None
+    return SummaryResponse(content=content, debug=debug)

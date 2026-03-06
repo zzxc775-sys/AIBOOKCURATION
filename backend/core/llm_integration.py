@@ -52,7 +52,7 @@ class DeepSeekRecommender:
     # ---------------------------------------------------------------------
     @retry(
         # 2회까지만 시도: 1차 실패(일시적 네트워크)면 1번만 더.
-        stop=stop_after_attempt(2),
+        stop=stop_after_attempt(1),
         # 재시도 대기시간 고정 0.5초 (길게 끌지 않음)
         wait=wait_fixed(0.5),
         # Timeout/ConnectionError 같은 네트워크 계열만 재시도
@@ -66,7 +66,7 @@ class DeepSeekRecommender:
         """
         # 1) 짧은 프롬프트 생성
         prompt = self._build_prompt(user_query, books)
-
+        logger.info("LLM prompt chars=%d", len(prompt))
         # 2) API 페이로드 구성 (토큰/길이 제한 강화)
         payload = {
             "model": model,
@@ -140,7 +140,6 @@ class DeepSeekRecommender:
 
 ## 3. 다음 선택을 위한 안내
 - 확인 질문 1개
-- 추가로 알려주면 좋은 정보 2개
 """.strip()
 
     # ---------------------------------------------------------------------
@@ -164,7 +163,7 @@ class DeepSeekRecommender:
             author = b.get("author") or "저자 정보 없음"
 
             # description/content는 길게 넣지 않기(입력 토큰 절약)
-            desc = b.get("snippet") or b.get("content") or b.get("description") or ""
+            desc = b.get("snippet") or ""
             desc = _clip(desc, 140)
 
             score = b.get("score")

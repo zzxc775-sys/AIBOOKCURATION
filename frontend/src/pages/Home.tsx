@@ -1,5 +1,7 @@
 import { useEffect, useRef, useState } from "react"
 import BookCard from "../components/BookCard"
+import { fetchRecommend, fetchSummary, type SummaryBook } from "../types/api"
+
 
 /* -----------------------------------------------------------
  * 1) 타입 정의 - 이해를 돕기 위해 파일 안에 간단히 작성
@@ -24,33 +26,6 @@ type ChatMessage = {
 }
 
 /* -----------------------------------------------------------
- * 2) API 호출 함수 - 백엔드 /recommend 로 POST
- *    - .env 에 VITE_API_BASE_URL 이 없으면 127.0.0.1:8000 사용
- * ---------------------------------------------------------*/
-const API_BASE =
-  (import.meta as any).env?.VITE_API_BASE ?? "http://127.0.0.1:8000"
-
-async function fetchRecommend(query: string, topK = 5) {
-  const resp = await fetch(`${API_BASE}/recommend`, {
-    method: "POST",
-    headers: { "Content-Type": "application/json" },
-    // 백엔드 RecommendRequest 스키마: { query, top_k }
-    body: JSON.stringify({ query, top_k: topK }),
-  })
-  if (!resp.ok) {
-    // 디버깅을 돕기 위해 서버 응답 원문을 에러에 포함
-    const text = await resp.text()
-    throw new Error(`API ${resp.status}: ${text}`)
-  }
-  // 기대 응답: { query: string, results: BookItem[], content?: string }
-  return (await resp.json()) as {
-    query: string
-    results: BookItem[]
-    content?: string | null
-  }
-}
-
-/* -----------------------------------------------------------
  * 3) 메인 컴포넌트
  *    - 처음엔 '랜딩 모드' (간단한 인풋 + 버튼)
  *    - 첫 질문 전송 시 '채팅 모드'로 전환하여 이후 대화 누적
@@ -62,6 +37,11 @@ export default function Home() {
   const [isSending, setIsSending] = useState(false)
   const threadRef = useRef<HTMLDivElement>(null)
 
+  // 👇 컴포넌트 내부에서
+  const activeReqIdRef = useRef<string | null>(null);
+  const summaryAbortRef = useRef<AbortController | null>(null);
+
+
   // 새 메시지가 들어올 때마다 스크롤 맨 아래로
   useEffect(() => {
     if (threadRef.current) {
@@ -71,64 +51,138 @@ export default function Home() {
 
   // 공통 전송 핸들러 (랜딩/채팅에서 모두 사용)
   const handleSend = async () => {
-    const q = input.trim()
-    if (!q || isSending) return
-
+    const q = input.trim();
+    if (!q || isSending) return;
+  
+    // 0) 이전 summary 요청 취소 (연속 검색시 레이스 방지)
+    summaryAbortRef.current?.abort();
+    summaryAbortRef.current = null;
+  
     // 1) 랜딩 → 채팅 화면 전환 (첫 메시지일 때)
-    if (mode === "landing") setMode("chat")
-
-    setInput("")
-
-    // 2) 유저 메시지 추가
-    const userId = crypto.randomUUID()
-    const assistantId = crypto.randomUUID()
+    if (mode === "landing") setMode("chat");
+  
+    setInput("");
+  
+    // 2) 유저/어시스턴트 메시지 추가
+    const userId = crypto.randomUUID();
+    const assistantId = crypto.randomUUID();
+  
+    // 이번 요청의 고유 ID (요약 응답이 늦게 와도 매칭 체크)
+    const reqId = crypto.randomUUID();
+    activeReqIdRef.current = reqId;
+  
     setMessages((prev) => [
       ...prev,
       { id: userId, role: "user", content: q },
       {
         id: assistantId,
         role: "assistant",
-        content: "", // 곧 채움
+        content: "추천 결과를 불러오는 중…",
         isStreaming: true,
       },
-    ])
-
-    // 3) 백엔드 호출
-    setIsSending(true)
+    ]);
+  
+    setIsSending(true);
+  
     try {
-      const res = await fetchRecommend(q, 5)
-
-      // 4) 어시스턴트 메시지에 결과/요약 적용
+      // 3) 1차: 추천(검색)
+      const res = await fetchRecommend(q, 5);
+  
+      // 추천 결과 반영
       setMessages((prev) =>
         prev.map((m) =>
           m.id === assistantId
             ? {
                 ...m,
                 isStreaming: false,
-                content: res.content ?? "추천 결과를 정리했어요!",
+                content: "추천 이유 생성 중…",
                 books: res.results ?? [],
               }
             : m
         )
-      )
+      );
+  
+      // 4) 2차: 요약(LLM) - top3만 최소 payload로
+      const top3: SummaryBook[] = (res.results ?? []).slice(0, 3).map((b, idx) => {
+        const text = (b.description ?? b.content ?? "").trim().replace(/\s+/g, " ");
+        const snippet = text.length > 80 ? text.slice(0, 80) + "..." : text;
+        return {
+          title: b.title,
+          author: b.author,
+          snippet,
+          rank: idx + 1,
+          score_pct: (b as any).score_pct,
+        };
+      });
+  
+      // books가 없으면 summary 호출할 필요 없음
+      if (top3.length === 0) {
+        setMessages((prev) =>
+          prev.map((m) =>
+            m.id === assistantId
+              ? { ...m, content: "추천할 도서를 찾지 못했어요. 다른 키워드로 다시 시도해 주세요." }
+              : m
+          )
+        );
+        return;
+      }
+  
+      // AbortController 설정
+      const ac = new AbortController();
+      summaryAbortRef.current = ac;
+  
+      fetchSummary(q, top3, ac.signal)
+        .then((sum) => {
+          // ✅ 레이스 방지: 최신 요청인지 확인
+          if (activeReqIdRef.current !== reqId) return;
+  
+          const text = (sum.content ?? "").trim();
+          setMessages((prev) =>
+            prev.map((m) =>
+              m.id === assistantId
+                ? { ...m, content: text || "추천 이유를 생성하지 못했어요." }
+                : m
+            )
+          );
+        })
+        .catch((e: any) => {
+          // Abort는 조용히 무시 (새 요청이 온 정상 케이스)
+          if (e?.name === "AbortError") return;
+  
+          // ✅ 레이스 방지
+          if (activeReqIdRef.current !== reqId) return;
+  
+          setMessages((prev) =>
+            prev.map((m) =>
+              m.id === assistantId
+                ? { ...m, content: "추천 이유 생성이 지연되고 있어요. 잠시 후 다시 시도해 주세요." }
+                : m
+            )
+          );
+        })
+        .finally(() => {
+          if (summaryAbortRef.current === ac) {
+            summaryAbortRef.current = null;
+          }
+        });
     } catch (e: any) {
+      // recommend 자체 실패
       setMessages((prev) =>
         prev.map((m) =>
           m.id === assistantId
             ? {
                 ...m,
                 isStreaming: false,
-                error:
-                  e?.message ||
-                  "추천 생성 중 오류가 발생했어요. 잠시 후 다시 시도해주세요.",
+                error: e?.message || "추천 생성 중 오류가 발생했어요. 잠시 후 다시 시도해주세요.",
               }
             : m
         )
-      )
+      );
     } finally {
-      setIsSending(false)
+      setIsSending(false);
     }
-  }
+  };
+  
 
   // 엔터 전송(Shift+Enter 줄바꿈)
   const onKeyDown = (e: React.KeyboardEvent<HTMLTextAreaElement>) => {
