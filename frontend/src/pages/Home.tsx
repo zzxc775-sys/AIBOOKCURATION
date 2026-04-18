@@ -54,6 +54,13 @@ export default function Home() {
     const q = input.trim();
     if (!q || isSending) return;
   
+    // ✅ GA 이벤트 추가
+    if (typeof window !== 'undefined' && (window as any).gtag) {
+      (window as any).gtag('event', 'search', {
+        search_term: q
+      })
+    }
+
     // 0) 이전 summary 요청 취소 (연속 검색시 레이스 방지)
     summaryAbortRef.current?.abort();
     summaryAbortRef.current = null;
@@ -88,6 +95,14 @@ export default function Home() {
       // 3) 1차: 추천(검색)
       const res = await fetchRecommend(q, 5);
   
+      // ✅ 결과 이벤트
+      if (typeof window !== 'undefined' && (window as any).gtag) {
+        (window as any).gtag('event', 'view_results', {
+          search_term: q,
+          result_count: res.results?.length || 0
+        })
+      }
+
       // 추천 결과 반영
       setMessages((prev) =>
         prev.map((m) =>
@@ -327,3 +342,5 @@ export default function Home() {
     </div>
   )
 }
+
+
